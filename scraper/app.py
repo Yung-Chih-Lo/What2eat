@@ -137,24 +137,17 @@ def scrape_google_reviews(
             scraping_status[keyword]["status"] = "processing"
             scraping_status[keyword]["message"] = "連接到 Google Maps"
 
-        logging.info("Connecting to Google Maps preview page...")
         driver.get("https://www.google.com.tw/maps/preview")
-        time.sleep(3)
-
-        logging.info("Searching for the place...")
         search_box = wait.until(
             EC.presence_of_element_located((By.ID, "searchboxinput"))
         )
         search_box.send_keys(keyword)
         search_box.send_keys(Keys.ENTER)
-        time.sleep(2)
 
-        logging.info("Clicking on review tab...")
         review_tab = wait.until(
             EC.element_to_be_clickable((By.XPATH, "//button[.//div[text()='評論']]"))
         )
         review_tab.click()
-        time.sleep(2)
 
         scrollable_div = wait.until(
             EC.presence_of_element_located(
@@ -166,13 +159,25 @@ def scrape_google_reviews(
         )
 
         logging.info("Scrolling to load reviews...")
-        for i in range(10):
+        for _ in range(10):
+            previous_height = driver.execute_script(
+                "return arguments[0].scrollHeight;", scrollable_div
+            )
             driver.execute_script(
                 "arguments[0].scrollTop = arguments[0].scrollHeight;", scrollable_div
             )
-            if keyword in scraping_status:
-                scraping_status[keyword]["message"] = f"載入更多評論 ({i+1}/10)"
-            time.sleep(0.5)
+
+            # 等待 scrollHeight 增加，代表有載入新評論
+            try:
+                wait.until(
+                    lambda d: driver.execute_script(
+                        "return arguments[0].scrollHeight;", scrollable_div
+                    )
+                    > previous_height
+                )
+            except:
+                # 若超過指定秒數沒變化，表示已無更多評論可以載入
+                break
 
         logging.info("Extracting reviews...")
         reviews = driver.find_elements(By.CSS_SELECTOR, "div.jftiEf.fontBodyMedium")
