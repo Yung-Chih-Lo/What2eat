@@ -58,10 +58,11 @@ const RestaurantSearch = () => {
         const data = await response.json();
         
         // 檢查分析檔案是否存在
-        const analysisResponse = await fetch(`http://localhost:5000/api/reviews/${keyword}_analysis.json`);
+        const analysisResponse = await fetch(`http://localhost:5000/api/reviews/${keyword}_analysis`);
         if (analysisResponse.ok) {
-          const analysisData = await analysisResponse.json();
-          setAnalysisData(analysisData);
+          const analysisData = await analysisResponse.json(); // 解析 JSON 資料
+          console.log(analysisData); // 打印解析後的資料
+          setAnalysisData(analysisData); // 更新狀態
         }
         
         return data;

@@ -4,14 +4,13 @@ import logging
 import os
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
 
 from flask import Flask, jsonify, request
 from flask_cors import CORS
-from google.cloud import firestore
+from google.cloud import firestore, aiplatform
 from google.oauth2 import service_account
-from openai import OpenAI
-from peft import PeftConfig, PeftModel
+from vertexai.preview.generative_models import GenerativeModel
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
@@ -19,23 +18,38 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
-from transformers import AutoModelForQuestionAnswering, AutoTokenizer, pipeline
 from webdriver_manager.chrome import ChromeDriverManager
+from transformers import pipeline, AutoTokenizer, AutoModelForQuestionAnswering
+from peft import PeftModel, PeftConfig
 
 # 設定logging
 logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[
+        logging.FileHandler("app.log"),
+        logging.StreamHandler()
+    ]
 )
+
+PROJECT_ID = "data-model-lecture"
+
 
 app = Flask(__name__)
 CORS(app)
 
+# export GOOGLE_APPLICATION_CREDENTIALS="/path/to/your/service-account-file.json" -> 環境變數 mac
+# set GOOGLE_APPLICATION_CREDENTIALS=C:\Users\username\Downloads\your-service-account-file.json -> 環境變數 windows
 credentials = service_account.Credentials.from_service_account_file(
     os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "YOUR_GOOGLE_APPLICATION_CREDENTIALS")
 )
+
+# 初始化 AI Platform，傳遞憑證
+aiplatform.init(project=PROJECT_ID, credentials=credentials, location="us-central1")
+
 # 初始化 Firestore 客戶端
 db = firestore.Client(
-    project="dm-project-445608", credentials=credentials, database="dm-firestore"
+    project=PROJECT_ID, credentials=credentials, database="dm-firestore"
 )
 
 # 用於儲存爬蟲狀態
@@ -43,12 +57,37 @@ scraping_status = {}
 # 用於儲存正在執行的線程
 active_threads = {}
 
-# 設定 OpenAI API Key
-openai_api_key = os.getenv("OPENAI_API_KEY", "your-openai-api-key")
-client = OpenAI(api_key=openai_api_key)
+def build_prompt(context, question):
+    """製作餵給 Gemini 的 Prompt"""
+    prompt = f"""
+    Instructions: Answer the question using the following Context.
 
-# 設定QA模型路徑（請確認模型文件在此路徑下）
-model_path = r"lora_qa_model_new/lora_qa_model_new"
+    Context: {context}
+
+    Question: {question}
+    """
+    return prompt
+
+
+def answer_question_gemini(context, question):
+    """使用 Gemini 模型回答問題"""
+    prompt = build_prompt(context, question)
+    
+    model = GenerativeModel("gemini-1.5-pro-002")
+    try:
+        response = model.generate_content(
+            prompt,
+            generation_config={
+                "max_output_tokens": 8192,
+                "temperature": 0.2,
+                "top_p": 0.5,
+                "top_k": 10,
+            },
+            stream=False,
+        )
+        return response.text
+    except Exception as e:
+        logging.error(f"發生錯誤：{e}")
 
 
 def upload_reviews_to_firestore(collection_name, reviews):
@@ -106,8 +145,8 @@ def should_scrape(keyword, frequency_days=7):
     if doc.exists:
         last_scraped = doc.to_dict().get("last_scraped")
         if last_scraped:
-            last_scraped_time = last_scraped.to_pydatetime()
-            current_time = datetime.utcnow()
+            last_scraped_time = last_scraped
+            current_time = datetime.now(timezone.utc)
             elapsed_days = (current_time - last_scraped_time).days
             return elapsed_days >= frequency_days
     # 如果文檔不存在或沒有記錄，則需要爬取
@@ -119,7 +158,7 @@ def scrape_google_reviews(
 ):
     logging.info(f"Start scraping for keyword: {keyword}")
     chrome_options = Options()
-    chrome_options.add_argument("--headless=new")
+    # chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1920,1080")
     chrome_options.add_argument("--no-sandbox")
@@ -144,6 +183,8 @@ def scrape_google_reviews(
         search_box.send_keys(keyword)
         search_box.send_keys(Keys.ENTER)
 
+        
+        
         review_tab = wait.until(
             EC.element_to_be_clickable((By.XPATH, "//button[.//div[text()='評論']]"))
         )
@@ -194,7 +235,7 @@ def scrape_google_reviews(
         if doc.exists:
             last_scraped = doc.to_dict().get("last_scraped")
             if last_scraped:
-                last_scraped_time = last_scraped.to_pydatetime()
+                last_scraped_time = last_scraped
 
         for idx, review in enumerate(reviews, 1):
             try:
@@ -259,7 +300,9 @@ def scrape_google_reviews(
 
         logging.info("Reviews uploaded, starting QA analysis...")
         # 爬完之後進行 QA 分析和總結
-        analysis_result = analyze_reviews_with_qa(all_reviews)
+        analysis_result = analyze_reviews_with_qa_lora(all_reviews)
+        # API會使用太多資源，所以使用 local LLM 配合 lora 進行分析
+        # analysis_result = analyze_reviews_with_qa_gemeni(all_reviews) 
 
         logging.info("QA analysis completed, uploading analysis to Firestore...")
         # 上傳分析結果到 Firestore
@@ -282,20 +325,18 @@ def scrape_google_reviews(
         driver.quit()
 
 
-def analyze_reviews_with_qa(reviews):
+def analyze_reviews_with_qa_lora(reviews):
     logging.info("Analyzing reviews with QA pipeline...")
-
+   
     # 讓問題本身更明確,引導模型給出更準確的答案
     question1 = "根據這段評論,這家餐廳實際表現好的地方有哪些?請列出具體的優點。若無則回答「無優點」"
-    question2 = "根據這段評論,這家餐廳實際表現不好的地方有哪些?請列出具體的缺點。若無則回答「無缺點」"
-    question3 = (
-        "根據這段評論,有哪些值得一試的餐點或特色菜?請列出具體菜名。若無則回答「無推薦」"
-    )
+    question2 = "根據這段評論,這家餐廳實際表現不好的地方有哪些?請列出具體的缺點。若無則回答「無缺點」" 
+    question3 = "根據這段評論,有哪些值得一試的餐點或特色菜?請列出具體菜名。若無則回答「無推薦」"
 
     positives = []
     negatives = []
     recommendations = []
-
+    
     seen_positives = set()
     seen_negatives = set()
     seen_recommendations = set()
@@ -311,20 +352,20 @@ def analyze_reviews_with_qa(reviews):
             ans3 = qa_pipeline(question=question3, context=context)
 
             # 只過濾重複內容和無效答案
-            if ans1 and ans1["answer"] and ans1["answer"] != "無優點":
-                if ans1["answer"] not in seen_positives:
-                    positives.append(ans1["answer"])
-                    seen_positives.add(ans1["answer"])
+            if ans1 and ans1['answer'] and ans1['answer'] != "無優點":
+                if ans1['answer'] not in seen_positives:
+                    positives.append(ans1['answer'])
+                    seen_positives.add(ans1['answer'])
+                    
+            if ans2 and ans2['answer'] and ans2['answer'] != "無缺點":
+                if ans2['answer'] not in seen_negatives:
+                    negatives.append(ans2['answer'])
+                    seen_negatives.add(ans2['answer'])
 
-            if ans2 and ans2["answer"] and ans2["answer"] != "無缺點":
-                if ans2["answer"] not in seen_negatives:
-                    negatives.append(ans2["answer"])
-                    seen_negatives.add(ans2["answer"])
-
-            if ans3 and ans3["answer"] and ans3["answer"] != "無推薦":
-                if ans3["answer"] not in seen_recommendations:
-                    recommendations.append(ans3["answer"])
-                    seen_recommendations.add(ans3["answer"])
+            if ans3 and ans3['answer'] and ans3['answer'] != "無推薦":
+                if ans3['answer'] not in seen_recommendations:
+                    recommendations.append(ans3['answer'])
+                    seen_recommendations.add(ans3['answer'])
 
             if idx % 10 == 0:
                 logging.info(f"QA processed {idx}/{len(reviews)} reviews...")
@@ -335,10 +376,153 @@ def analyze_reviews_with_qa(reviews):
 
     # 在進行 GPT 總結前，先進行一次 GPT 篩選
     logging.info("Starting GPT filtering...")
-    filtered_results = filter_with_gpt(positives, negatives, recommendations)
-
+        
+    filtered_results = filter_with_gemini(positives, negatives, recommendations)
+    
     logging.info("GPT filtering completed, starting final summary...")
-    summary_result = summarize_with_gpt(
+    summary_result = summarize_with_gemini(
+        filtered_results["positives"], 
+        filtered_results["negatives"], 
+        filtered_results["recommendations"]
+    )
+
+    return {
+        "individual_analysis": filtered_results,
+        "summary": summary_result
+    }
+
+
+def analyze_reviews_with_qa_gemeni(reviews):
+    logging.info("Analyzing reviews with QA pipeline...")
+
+    # 讓問題本身更明確,引導模型給出更準確的答案
+    context1 = """
+        你是評論大師，擁有數十年的餐廳評論經驗。請你根據這段使用者給的評價，回答這家餐廳實際表現好的地方有什麼？
+    
+        以下是你必須遵守的：
+        1. 回答必須是有意義的，不能是無意義的文字。
+        2. 只需要一個，且控制在20個字以內。
+        3. 具體的描述，不要含糊不清、太攏統。
+        4. 若無則回答「無優點」
+        
+        給你一個例子：
+        "義大利麵🍝和披薩🍕等主餐價位都落在350左右
+        排餐像是牛排、龍蝦🦞價位才比較高
+        披薩是10吋的用料實在cp值很高
+        披薩上的起司、明太子都很濃郁 唐揚雞是雞腿肉也很夠味 可以2～3人一起分😋
+        主餐可以+200元就有前菜、飲料、沙拉、甜點可以選👍🏻"
+        
+        你需要回答：
+        "披薩用料實在cp值很高"
+    """
+    context2 = """
+        你是評論大師，擁有數十年的餐廳評論經驗。請你根據這段使用者給的評價，回答這家餐廳實際表現「不好」的地方有什麼？
+        
+        以下是你必須遵守的：
+        1. 回答必須是有意義的，不能是無意義的文字。
+        2. 只需要一個，且控制在20個字以內。
+        3. 具體的描述，不要含糊不清、太攏統。
+        4. 若無則回答「無缺點」
+        
+        給你一個例子：
+        "義大利麵🍝和披薩🍕等主餐價位都落在350左右
+        排餐像是牛排、龍蝦🦞價位才比較高
+        披薩是10吋的用料實在cp值很高
+        披薩上的起司、明太子都很濃郁 唐揚雞是雞腿肉也很夠味 可以2～3人一起分😋
+        主餐可以+200元就有前菜、飲料、沙拉、甜點可以選👍🏻"
+        
+        你需要回答：
+        "排餐價位高"
+    """
+    context3 = """
+        你是評論大師，擁有數十年的餐廳評論經驗。請你根據這段使用者給的評價，有哪些值得一試的餐點或特色菜？
+        
+        以下是你必須遵守的：
+        1. 回答必須是有意義的，不能是無意義的文字。
+        2. 只需要一個，且控制在20個字以內。
+        3. 列出具體菜名，不要含糊不清、太攏統。
+        4. 若無則回答「無推薦」。
+        
+        給你一個例子：
+        "義大利麵🍝和披薩🍕等主餐價位都落在350左右
+        排餐像是牛排、龍蝦🦞價位才比較高
+        披薩是10吋的用料實在cp值很高
+        披薩上的起司、明太子都很濃郁 唐揚雞是雞腿肉也很夠味 可以2～3人一起分😋
+        主餐可以+200元就有前菜、飲料、沙拉、甜點可以選👍🏻"
+        
+        你需要回答：
+        "義大利麵和披薩"
+    """
+
+    positives = [] # 優點
+    negatives = [] # 缺點
+    recommendations = [] # 推薦
+
+    seen_positives = set() # 用於過濾重複內容
+    seen_negatives = set() # 用於過濾重複內容
+    seen_recommendations = set() # 用於過濾重複內容
+
+    for idx, r in enumerate(reviews, start=1):
+        question = r.get("評論", "")
+        if not question:
+            continue
+
+        try:
+            ans1 = answer_question_gemini(
+                context=context1,
+                question=question
+            )
+
+            ans2 = answer_question_gemini(
+                context=context2,
+                question=question
+            )
+            
+            ans3 = answer_question_gemini(
+                context=context3,
+                question=question
+            )
+
+            # 只過濾重複內容和無效答案
+            if ans1 and ans1 != "無優點":
+                if ans1 not in seen_positives:
+                    positives.append(ans1)
+                    seen_positives.add(ans1)
+
+            if ans2 and ans2 != "無缺點":
+                if ans2 not in seen_negatives:
+                    negatives.append(ans2)
+                    seen_negatives.add(ans2)
+
+            if ans3 and ans3 != "無推薦":
+                if ans3 not in seen_recommendations:
+                    recommendations.append(ans3)
+                    seen_recommendations.add(ans3)
+
+            if idx % 10 == 0:
+                logging.info(f"QA processed {idx}/{len(reviews)} reviews...")
+
+        except Exception as e:
+            logging.error(f"QA處理第 {idx} 則評論時出現問題: {e}")
+            continue
+
+    # 在進行 gemini 總結前，先進行一次 gemini 篩選
+    logging.info("Starting gemini filtering...")
+    
+    # data ={
+    #     "positives": positives,
+    #     "negatives": negatives,
+    #     "recommendations": recommendations
+    # }
+    # print(data)
+    
+    # with open("first.json", "w", encoding='utf-8') as f:
+    #     json.dump(data, f, ensure_ascii=False, indent=4)
+    
+    filtered_results = filter_with_gemini(positives, negatives, recommendations) # json
+
+    logging.info("gemini filtering completed, starting final summary...")
+    summary_result = summarize_with_gemini( # str
         filtered_results["positives"],
         filtered_results["negatives"],
         filtered_results["recommendations"],
@@ -347,48 +531,47 @@ def analyze_reviews_with_qa(reviews):
     return {"individual_analysis": filtered_results, "summary": summary_result}
 
 
-def filter_with_gpt(positives, negatives, recommendations):
-    prompt = f"""
-請以 JSON 格式回答。請仔細分析以下餐廳評論中提取出的內容，並進行二次篩選，確保內容的準確性和相關性。
+def filter_with_gemini(positives, negatives, recommendations):
+    context = context = """
+        你是一個專業的餐廳評論分析專家。
+        
+        請 step by step 仔細分析餐廳評論中提取出的內容，並進行二次篩選，確保內容的準確性和相關性。
+        
+        遵守以下規則：
+        1. 移除不相關或重複的內容
+        2. 整合相似的描述
+        3. 移除模糊不清的評價，不要保留沒有意義的文字
+        4. 請務必以 JSON 格式返回結果，格式如下：
+        {
+            "positives": list[str],
+            "negatives": list[str],
+            "recommendations": list[str]
+        }
+        5. json 回覆時，不要有多餘的字體，像是 "json"、換行符號等
+    """
+    
+    question = f"""
+    請參考以下原始資料，根據上述要求進行分析和整理。
+        原始優點列表:
+        {json.dumps(positives, ensure_ascii=False)}
 
-原始優點列表:
-{json.dumps(positives, ensure_ascii=False)}
+        原始缺點列表:
+        {json.dumps(negatives, ensure_ascii=False)}
 
-原始缺點列表:
-{json.dumps(negatives, ensure_ascii=False)}
-
-原始推薦列表:
-{json.dumps(recommendations, ensure_ascii=False)}
-
-請執行以下任務：
-1. 移除不相關或重複的內容
-2. 確保每個類別的內容確實屬於該類別
-3. 整合相似的描述
-4. 移除模糊不清的評價
-
-請以 JSON 格式返回結果，格式如下：
-{{
-   "positives": ["優點1", "優點2", ...],
-   "negatives": ["缺點1", "缺點2", ...],
-   "recommendations": ["推薦1", "推薦2", ...]
-}}
-"""
+        原始推薦列表:
+        {json.dumps(recommendations, ensure_ascii=False)}
+    """
+    
     try:
-        response = client.chat.completions.create(
-            model="gpt-4-turbo",
-            messages=[
-                {
-                    "role": "system",
-                    "content": "你是一個專業的餐廳評論分析專家。請以 JSON 格式回傳分析結果。",
-                },
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.3,
-            # response_format={"type": "json_object"}  # 這行無效，需要解析文本
+        response = answer_question_gemini(
+                context=context,
+                question=question
         )
-        return json.loads(response.choices[0].message.content)
+        response = response.strip()
+        logging.info("gemini filtering completed.")
+        return json.loads(response)
     except Exception as e:
-        logging.error(f"GPT 篩選時發生錯誤: {e}")
+        logging.error(f"gemini 篩選時發生錯誤: {e}")
         return {
             "positives": positives,
             "negatives": negatives,
@@ -396,47 +579,55 @@ def filter_with_gpt(positives, negatives, recommendations):
         }
 
 
-def summarize_with_gpt(positives, negatives, recommendations):
-    prompt = f"""
-分析以下餐廳評論的優點、缺點和推薦項目清單，並提供一個簡潔的總結。請直接給出分析結果，不要使用「從評論中可以看出」之類的引導語。評分請先單獨列出，並同時整合在內容中。
+def summarize_with_gemini(positives, negatives, recommendations):
+    context = """
+        你是一位專業的餐廳評論家，擁有豐富的經驗。
+        
+        要求：
+        1. 請直接陳述分析結果
+        2. 保持專業客觀的語氣
+        3. 重點摘要餐廳的特色和服務
+        4. 整體評分(滿分5分)請先列出，並再自然地融入描述中
+        5. 最後總結這家餐廳適合什麼樣的消費者，並用一段話總結一下整體感受
+        6. 不要使用「從評論中可以看出」之類的引導語。評分請先單獨列出，並同時整合在內容中。
+        
+        我給你一個回答例如：
+        "評分：4/5\n\n這家位於木新路的義大利料理餐廳擁有多樣化的菜單，包括套餐和早午餐選項，尤其推薦如牛排、義大利麵和烤飯等主菜。特色甜點如提拉米蘇和布朗尼蛋糕也深受好評。環境方面，裝潢古典且富有歐式風格，提供了一個氣氛佳且舒適的用餐環境，適合多人聚餐。\n\n儘管服務態度普遍親切，但存在服務生難以找到的問題，可能會影響顧客的用餐體驗。此外，部分餐點如豬肉串和沙拉的口味有待提升。餐廳位置對某些顧客來說可能不太方便。\n\n總體來說，這家餐廳因其美味的食物、多樣的選擇和優雅的環境受到推崇。對於尋求美味義大利料理和愉悅用餐環境的顧客來說，是一個不錯的選擇。然而，建議餐廳改進服務效率和部分菜品的品質，以提升顧客滿意度。总体而言，這家餐廳非常適合喜歡嘗試高品質義大利菜和享受美麗環境的顧客。"
+    """
+    questions = f"""
+    現在你必須根據以下這些資訊，請為餐廳評論提供一個簡潔的總結。
+    
+        優點：
+        {json.dumps(positives, ensure_ascii=False)}
 
-優點：
-{json.dumps(positives, ensure_ascii=False)}
+        缺點：
+        {json.dumps(negatives, ensure_ascii=False)}
 
-缺點：
-{json.dumps(negatives, ensure_ascii=False)}
+        推薦必點：
+        {json.dumps(recommendations, ensure_ascii=False)}
+    """
+    
 
-推薦必點：
-{json.dumps(recommendations, ensure_ascii=False)}
-
-要求：
-1. 請直接陳述分析結果
-2. 保持專業客觀的語氣
-3. 重點摘要餐廳的特色和服務
-4. 整體評分(滿分10分)請先列出，並再自然地融入描述中
-5. 最後總結這家餐廳適合什麼樣的消費者，並用一段話總結一下整體感受
-"""
     try:
-        response = client.chat.completions.create(
-            model="gpt-4-turbo",
-            messages=[
-                {
-                    "role": "system",
-                    "content": "你是一位專業的餐廳評論家，請以簡潔直接的方式分析餐廳評論。避免使用「從評論可以看出」等引導語。",
-                },
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.7,
-            max_tokens=1024,
+        answer = answer_question_gemini(
+            context=context,
+            question=questions
         )
-        answer = response.choices[0].message.content.strip()
-        logging.info("GPT summarization completed.")
+        logging.info("gemini summarization completed.")
     except Exception as e:
-        logging.error(f"GPT 總結時發生錯誤: {e}")
-        answer = f"GPT 總結時發生錯誤: {e}"
+        logging.error(f"gemini 總結時發生錯誤: {e}")
+        answer = f"gemini 總結時發生錯誤: {e}"
 
     return answer
 
+@app.route('/api/reviews/<keyword>/status', methods=['GET'])
+def get_status(keyword):
+    if keyword in scraping_status:
+        return jsonify(scraping_status[keyword])
+    return jsonify({
+        'status': 'not_found',
+        'message': 'No scraping job found'
+    }), 404
 
 @app.route("/api/scrape-reviews", methods=["POST"])
 def start_scrape():
@@ -450,6 +641,13 @@ def start_scrape():
 
         # 判斷是否需要爬取
         if not should_scrape(keyword):
+            # FIXME 如果沒有狀態，則會無法觸發前端抓取資訊
+            scraping_status[keyword] = {
+                "status": "completed",
+                "message": "未達到爬取頻率",
+                "total_reviews": 0,
+                "processed_reviews": 0,
+            }
             logging.info(f"不需要爬取 {keyword}，因為未達到爬取頻率")
             return (
                 jsonify(
@@ -475,9 +673,9 @@ def start_scrape():
             target=scrape_google_reviews,
             args=(
                 keyword,
-                "scraper/chromedriver-win32/chromedriver-win64/chromedriver.exe",
+                "scraper/chromedriver-win32/chromedriver-win64/chromedriver.exe", # NOTE 確保 chromedriver 路徑正確
                 "reviews",
-            ),  # 確保 chromedriver 路徑正確
+            ),  
         )
         active_threads[keyword] = thread
         thread.start()
@@ -527,15 +725,16 @@ def get_analysis(keyword):
 
 
 if __name__ == "__main__":
+    # 設定QA模型路徑（請確認模型文件在此路徑下）
+    model_path = r"scraper/lora_qa_model_new/lora_qa_model_new"
+    
     # 使用PEFT從LoRA模型中取config
     logging.info("Loading PEFT config...")
     peft_config = PeftConfig.from_pretrained(model_path)
 
     logging.info("Loading base model and tokenizer...")
     base_tokenizer = AutoTokenizer.from_pretrained(peft_config.base_model_name_or_path)
-    base_model = AutoModelForQuestionAnswering.from_pretrained(
-        peft_config.base_model_name_or_path
-    )
+    base_model = AutoModelForQuestionAnswering.from_pretrained(peft_config.base_model_name_or_path)
 
     logging.info("Loading LoRA weights...")
     model = PeftModel.from_pretrained(base_model, model_path)
@@ -543,5 +742,4 @@ if __name__ == "__main__":
 
     logging.info("Initializing QA pipeline...")
     qa_pipeline = pipeline("question-answering", model=model, tokenizer=tokenizer)
-
     app.run(debug=True, port=5000)
