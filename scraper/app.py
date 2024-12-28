@@ -158,7 +158,7 @@ def scrape_google_reviews(
 ):
     logging.info(f"Start scraping for keyword: {keyword}")
     chrome_options = Options()
-    # chrome_options.add_argument("--headless=new")
+    chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1920,1080")
     chrome_options.add_argument("--no-sandbox")
