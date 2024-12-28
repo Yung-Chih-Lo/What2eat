@@ -57,6 +57,17 @@ scraping_status = {}
 # 用於儲存正在執行的線程
 active_threads = {}
 
+def save2json(dir_name:str, file_name:str ,reviews: list|dict):
+    """將數據保存到本地 JSON 文件"""
+    if not os.path.exists(dir_name):
+        os.makedirs(dir_name)
+
+    file_name = os.path.join(dir_name, file_name)
+    with open(file_name, "w", encoding="utf-8") as f:
+        json.dump(reviews, f, ensure_ascii=False, indent=4)
+    logging.info(f"評論數據已保存到: {file_name}")
+
+
 def build_prompt(context, question):
     """製作餵給 Gemini 的 Prompt"""
     prompt = f"""
@@ -376,8 +387,26 @@ def analyze_reviews_with_qa_lora(reviews):
 
     # 在進行 GPT 總結前，先進行一次 GPT 篩選
     logging.info("Starting GPT filtering...")
-        
+    
+    results = {
+        "positives": positives,
+        "negatives": negatives,
+        "recommendations": recommendations
+    }
+    
+    save2json(
+        dir_name="results",
+        file_name="first_result.json",
+        reviews=results
+    )
+    
     filtered_results = filter_with_gemini(positives, negatives, recommendations)
+    
+    save2json(
+        dir_name="results",
+        file_name="filtered_result.json",
+        reviews=results
+    )
     
     logging.info("GPT filtering completed, starting final summary...")
     summary_result = summarize_with_gemini(
@@ -386,10 +415,18 @@ def analyze_reviews_with_qa_lora(reviews):
         filtered_results["recommendations"]
     )
 
-    return {
+    final_result = {
         "individual_analysis": filtered_results,
         "summary": summary_result
     }
+    
+    save2json(
+        dir_name="results",
+        file_name="final_result.json",
+        reviews=final_result
+    )
+    
+    return final_result
 
 
 def analyze_reviews_with_qa_gemeni(reviews):
@@ -551,14 +588,14 @@ def filter_with_gemini(positives, negatives, recommendations):
     """
     
     question = f"""
-    請參考以下原始資料，根據上述要求進行分析和整理。
-        原始優點列表:
+    請參考以下優缺點和推薦的原始資料，並根據上述要求進行分析和整理。
+        original positives:
         {json.dumps(positives, ensure_ascii=False)}
 
-        原始缺點列表:
+        original negatives:
         {json.dumps(negatives, ensure_ascii=False)}
 
-        原始推薦列表:
+        original recommendations:
         {json.dumps(recommendations, ensure_ascii=False)}
     """
     
@@ -581,15 +618,14 @@ def filter_with_gemini(positives, negatives, recommendations):
 
 def summarize_with_gemini(positives, negatives, recommendations):
     context = """
-        你是一位專業的餐廳評論家，擁有豐富的經驗。
+        你是一位專業的餐廳評論家，擁有豐富的經驗。用一段話總結一下整體感受，這家餐廳適合什麼樣的消費者，有哪些值得改進的地方。
         
         要求：
         1. 請直接陳述分析結果
         2. 保持專業客觀的語氣
         3. 重點摘要餐廳的特色和服務
         4. 整體評分(滿分5分)請先列出，並再自然地融入描述中
-        5. 最後總結這家餐廳適合什麼樣的消費者，並用一段話總結一下整體感受
-        6. 不要使用「從評論中可以看出」之類的引導語。評分請先單獨列出，並同時整合在內容中。
+        5. 不要使用「從評論中可以看出」之類的引導語。評分請先單獨列出，並同時整合在內容中。
         
         我給你一個回答例如：
         "評分：4/5\n\n這家位於木新路的義大利料理餐廳擁有多樣化的菜單，包括套餐和早午餐選項，尤其推薦如牛排、義大利麵和烤飯等主菜。特色甜點如提拉米蘇和布朗尼蛋糕也深受好評。環境方面，裝潢古典且富有歐式風格，提供了一個氣氛佳且舒適的用餐環境，適合多人聚餐。\n\n儘管服務態度普遍親切，但存在服務生難以找到的問題，可能會影響顧客的用餐體驗。此外，部分餐點如豬肉串和沙拉的口味有待提升。餐廳位置對某些顧客來說可能不太方便。\n\n總體來說，這家餐廳因其美味的食物、多樣的選擇和優雅的環境受到推崇。對於尋求美味義大利料理和愉悅用餐環境的顧客來說，是一個不錯的選擇。然而，建議餐廳改進服務效率和部分菜品的品質，以提升顧客滿意度。总体而言，這家餐廳非常適合喜歡嘗試高品質義大利菜和享受美麗環境的顧客。"
