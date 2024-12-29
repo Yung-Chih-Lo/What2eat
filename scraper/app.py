@@ -251,7 +251,7 @@ def scrape_google_reviews(
                 )
                 if more_button:
                     more_button[0].click()
-                    time.sleep(0.2)
+                    time.sleep(0.1) # NOTE 修改成0.1秒
 
                 reviewer = review.find_element(By.CSS_SELECTOR, "div.d4r55").text
                 rating_element = review.find_element(By.CSS_SELECTOR, "span.kvMYJc")
