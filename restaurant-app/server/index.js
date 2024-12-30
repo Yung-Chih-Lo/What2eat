@@ -1,4 +1,7 @@
 // server/index.js
+
+// TODO 將 server 改成由 python 執行
+
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');

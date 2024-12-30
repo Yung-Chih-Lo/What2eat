@@ -14,11 +14,11 @@ const options = {
 
 const Map = ({ location, restaurants }) => {
   const { isLoaded, loadError } = useLoadScript({
-    googleMapsApiKey: import.meta.env.VITE_GOOGLE_MAPS_API_KEY,
+    googleMapsApiKey: import.meta.env.GOOGLE_MAPS_API_KEY,
     libraries,
   });
 
-  // console.log('Google Maps API Key:', import.meta.env.VITE_GOOGLE_MAPS_API_KEY);
+  // console.log('Google Maps API Key:', import.meta.env.GOOGLE_MAPS_API_KEY);
 
   const [selected, setSelected] = React.useState(null);
 

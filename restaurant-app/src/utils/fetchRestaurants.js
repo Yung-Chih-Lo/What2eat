@@ -1,7 +1,7 @@
 // src/utils/fetchRestaurants.js
 export const fetchNearbyRestaurants = async (location, radius = 1500) => {
     const { lat, lng } = location;
-    const url = `http://localhost:5001/api/nearby-restaurants?lat=${lat}&lng=${lng}&radius=${radius}`;
+    const url = `http://localhost:5000/api/nearby-restaurants?lat=${lat}&lng=${lng}&radius=${radius}`;
   
     try {
       const response = await fetch(url);

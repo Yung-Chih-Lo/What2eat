@@ -48,7 +48,7 @@ const NearbySearch = () => {
 
   const startScraping = async (keyword) => {
     try {
-      const response = await fetch('http://localhost:5001/api/scrape-reviews', {
+      const response = await fetch('http://localhost:5000/api/scrape-reviews', { // port 修改成 5000，使用 python 作為後端
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

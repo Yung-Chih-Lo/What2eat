@@ -5,7 +5,7 @@ import os
 import threading
 import time
 from datetime import datetime, timezone
-
+from math import radians, sin, cos, sqrt, atan2
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from google.cloud import aiplatform, firestore
@@ -21,6 +21,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from transformers import AutoModelForQuestionAnswering, AutoTokenizer, pipeline
 from vertexai.preview.generative_models import GenerativeModel
 from webdriver_manager.chrome import ChromeDriverManager
+import requests
 
 # 設定logging
 logging.basicConfig(
@@ -30,7 +31,8 @@ logging.basicConfig(
 )
 
 PROJECT_ID = "data-model-lecture"
-
+GOOGLE_MAPS_API_KEY = os.getenv('VITE_GOOGLE_MAPS_API_KEY', 'YOUR_GOOGLE_MAPS_API_KEY')
+GOOGLE_APPLICATION_CREDENTIALS = os.getenv('GOOGLE_APPLICATION_CREDENTIALS', 'YOUR_GOOGLE_APPLICATION_CREDENTIALS')
 
 app = Flask(__name__)
 CORS(app)
@@ -38,7 +40,7 @@ CORS(app)
 # export GOOGLE_APPLICATION_CREDENTIALS="/path/to/your/service-account-file.json" -> 環境變數 mac
 # set GOOGLE_APPLICATION_CREDENTIALS=C:\Users\username\Downloads\your-service-account-file.json -> 環境變數 windows
 credentials = service_account.Credentials.from_service_account_file(
-    os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "YOUR_GOOGLE_APPLICATION_CREDENTIALS")
+    GOOGLE_APPLICATION_CREDENTIALS
 )
 
 # 初始化 AI Platform，傳遞憑證
@@ -657,7 +659,7 @@ def start_scrape():
 
         # 判斷是否需要爬取
         if not should_scrape(keyword):
-            # FIXME 如果沒有狀態，則會無法觸發前端抓取資訊
+            # 如果沒有狀態，則會無法觸發前端抓取資訊
             scraping_status[keyword] = {
                 "status": "completed",
                 "message": "未達到爬取頻率",
@@ -702,6 +704,21 @@ def start_scrape():
         logging.error(f"Error when starting scrape: {e}")
         return jsonify({"error": str(e)}), 500
 
+def calculate_distance(loc1, loc2):
+    """
+    使用 Haversine 公式計算兩點之間的距離（米）
+    """
+    R = 6371e3  # 地球半徑（米）
+    phi1 = radians(loc1['lat'])
+    phi2 = radians(loc2['lat'])
+    delta_phi = radians(loc2['lat'] - loc1['lat'])
+    delta_lambda = radians(loc2['lng'] - loc1['lng'])
+
+    a = sin(delta_phi / 2) ** 2 + cos(phi1) * cos(phi2) * sin(delta_lambda / 2) ** 2
+    c = 2 * atan2(sqrt(a), sqrt(1 - a))
+
+    distance = R * c
+    return round(distance)
 
 @app.route("/api/reviews/<keyword>", methods=["GET"])
 def get_reviews(keyword):
@@ -739,6 +756,55 @@ def get_analysis(keyword):
         logging.error(f"Error getting analysis for {keyword}: {e}")
         return jsonify({"error": str(e)}), 500
 
+@app.route('/api/nearby-restaurants', methods=['GET'])
+def get_nearby_restaurants():
+    lat = request.args.get('lat')
+    lng = request.args.get('lng')
+    radius = request.args.get('radius', 1500)
+
+    if not lat or not lng:
+        return jsonify({'error': 'Missing latitude or longitude'}), 400
+
+    try:
+        lat = float(lat)
+        lng = float(lng)
+        radius = int(radius)
+    except ValueError:
+        return jsonify({'error': 'Invalid latitude, longitude, or radius format'}), 400
+
+    url = (
+        f'https://maps.googleapis.com/maps/api/place/nearbysearch/json'
+        f'?location={lat},{lng}&radius={radius}&type=restaurant&key={GOOGLE_MAPS_API_KEY}'
+    )
+
+    try:
+        response = requests.get(url)
+        data = response.json()
+
+        if data.get('status') != 'OK':
+            raise Exception(f"Google Places API error: {data.get('status')}")
+
+        results = []
+        for place in data.get('results', []):
+            place_lat = place['geometry']['location']['lat']
+            place_lng = place['geometry']['location']['lng']
+            distance = calculate_distance(
+                {'lat': lat, 'lng': lng},
+                {'lat': place_lat, 'lng': place_lng}
+            )
+            results.append({
+                'id': place['place_id'],
+                'name': place['name'],
+                'address': place.get('vicinity', ''),
+                'lat': place_lat,
+                'lng': place_lng,
+                'distance': distance
+            })
+
+        return jsonify(results)
+    except Exception as error:
+        print(error)
+        return jsonify({'error': 'Failed to fetch restaurants'}), 500
 
 if __name__ == "__main__":
     # 設定QA模型路徑（請確認模型文件在此路徑下）
