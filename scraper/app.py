@@ -1,4 +1,3 @@
-# app.py
 import json
 import logging
 import os
@@ -22,6 +21,8 @@ from transformers import AutoModelForQuestionAnswering, AutoTokenizer, pipeline
 from vertexai.preview.generative_models import GenerativeModel
 from webdriver_manager.chrome import ChromeDriverManager
 import requests
+from dotenv import load_dotenv
+load_dotenv()
 
 # 設定logging
 logging.basicConfig(

@@ -1,25 +1,20 @@
-// src/components/NearbySearch.jsx
 import React, { useState } from 'react';
 import { MapPin, Loader } from 'lucide-react';
-import Map from './Map';
-import { fetchNearbyRestaurants } from '../utils/fetchRestaurants';
+import { useNavigate } from 'react-router-dom';
 import Modal from 'react-modal';
+import { fetchNearbyRestaurants } from '../utils/fetchRestaurants';
+import Map from './Map';
+
+// 設置 Modal 的根元素，確保在應用中只設置一次
+Modal.setAppElement('#root');
 
 const NearbySearch = () => {
+  const navigate = useNavigate(); // 初始化 useNavigate
   const [location, setLocation] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
   const [nearbyRestaurants, setNearbyRestaurants] = useState([]);
-  
-  // 新增状态来存储评论
-  const [reviews, setReviews] = useState({});
-  const [isReviewLoading, setIsReviewLoading] = useState({});
-  const [reviewErrors, setReviewErrors] = useState({});
 
-  const [selectedRestaurant, setSelectedRestaurant] = useState(null);
-  const [modalReviews, setModalReviews] = useState([]);
-  const [modalError, setModalError] = useState(null);
-  const [isModalLoading, setIsModalLoading] = useState(false);
-
+  // 獲取當前位置
   const getCurrentLocation = () => {
     setIsLoading(true);
     if (navigator.geolocation) {
@@ -46,64 +41,9 @@ const NearbySearch = () => {
     }
   };
 
-  const startScraping = async (keyword) => {
-    try {
-      const response = await fetch('http://localhost:5000/api/scrape-reviews', { // port 修改成 5000，使用 python 作為後端
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ keyword }),
-      });
-      
-      if (!response.ok) {
-        throw new Error('爬蟲請求失敗');
-      }
-      
-      return await response.json();
-    } catch (error) {
-      console.error('爬蟲錯誤:', error);
-      throw error;
-    }
-  };
-
-  // 處理獲取評論的函數
-  const handleGetReviews = async (restaurantName) => {
-    
-    setIsReviewLoading(prev => ({ ...prev, [restaurantName]: true }));
-    setReviewErrors(prev => ({ ...prev, [restaurantName]: null }));
-
-    try {
-      const data = await startScraping(restaurantName);
-      setReviews(prev => ({ ...prev, [restaurantName]: data.reviews }));
-    } catch (error) {
-      setReviewErrors(prev => ({ ...prev, [restaurantName]: '獲取評論失敗' }));
-    } finally {
-      setIsReviewLoading(prev => ({ ...prev, [restaurantName]: false }));
-    }
-  };
-
-
-  const handleOpenModal = async (restaurantName) => {
-    setSelectedRestaurant(restaurantName);
-    setIsModalLoading(true);
-    setModalError(null);
-    setModalReviews([]);
-
-    try {
-      const data = await startScraping(restaurantName);
-      setModalReviews(data.reviews);
-    } catch (error) {
-      setModalError('獲取評論失敗');
-    } finally {
-      setIsModalLoading(false);
-    }
-  };
-
-  const handleCloseModal = () => {
-    setSelectedRestaurant(null);
-    setModalReviews([]);
-    setModalError(null);
+  // 處理導航到 Restaurant 頁面
+  const handleNavigateToRestaurant = (restaurantName) => {
+    navigate(`/restaurant/${encodeURIComponent(restaurantName)}`);
   };
 
   return (
@@ -139,6 +79,7 @@ const NearbySearch = () => {
 
         {location && (
           <div className="mb-6">
+            {/* 假設您有一個 Map 組件 */}
             <Map location={location} restaurants={nearbyRestaurants} />
           </div>
         )}
@@ -156,77 +97,15 @@ const NearbySearch = () => {
                 <span>{restaurant.distance} 公尺</span>
               </div>
               <button
-                onClick={() => handleGetReviews(restaurant.name)}
+                onClick={() => handleNavigateToRestaurant(restaurant.name)}
                 className="mt-2 bg-blue-500 text-white px-3 py-1 rounded hover:bg-blue-600 transition-all duration-200"
-                disabled={isReviewLoading[restaurant.name]}
               >
-                {isReviewLoading[restaurant.name] ? '獲取中...' : '獲取評論'}
+                獲取評論
               </button>
-              
-              {reviews[restaurant.name] && (
-                <div className="mt-4 p-2 bg-gray-700/50 rounded">
-                  <h4 className="text-white font-semibold mb-2">評論</h4>
-                  {reviews[restaurant.name].length > 0 ? (
-                    <ul className="list-disc list-inside text-gray-200">
-                      {reviews[restaurant.name].map((review, index) => (
-                        <li key={index}>{review}</li>
-                      ))}
-                    </ul>
-                  ) : (
-                    <p className="text-gray-400">暫無評論</p>
-                  )}
-                </div>
-              )}
-              {reviewErrors[restaurant.name] && (
-                <p className="mt-2 text-red-500">{reviewErrors[restaurant.name]}</p>
-              )}
             </div>
           ))}
         </div>
       </div>
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        {nearbyRestaurants.map((restaurant) => (
-          <div
-            key={restaurant.id}
-            className="bg-gray-800/50 border border-gray-700 rounded-lg p-4 shadow-lg backdrop-blur-sm hover:bg-gray-700/50 transition-all duration-200"
-          >
-            <h3 className="font-bold text-lg mb-2 text-white">{restaurant.name}</h3>
-            <p className="text-gray-400 text-sm mb-2">{restaurant.address}</p>
-            <div className="flex items-center text-gray-400 text-sm mb-2">
-              <MapPin size={16} className="mr-1" />
-              <span>{restaurant.distance} 公尺</span>
-            </div>
-            <button
-              onClick={() => handleOpenModal(restaurant.name)}
-              className="mt-2 bg-blue-500 text-white px-3 py-1 rounded hover:bg-blue-600 transition-all duration-200"
-            >
-              獲取評論
-            </button>
-          </div>
-        ))}
-      </div>
-
-      <Modal
-        isOpen={!!selectedRestaurant}
-        onRequestClose={handleCloseModal}
-        contentLabel="Restaurant Reviews"
-        className="max-w-2xl mx-auto mt-20 bg-white p-6 rounded-lg shadow-lg outline-none"
-        overlayClassName="fixed inset-0 bg-black bg-opacity-50 flex justify-center items-start z-50"
-      >
-        <button onClick={handleCloseModal} className="text-red-500 font-bold float-right">×</button>
-        <h2 className="text-2xl font-bold mb-4">評論{selectedRestaurant}</h2>
-        {isModalLoading && <Loader className="animate-spin" size={24} />}
-        {modalError && <p className="text-red-500">{modalError}</p>}
-        {modalReviews.length > 0 ? (
-          <ul className="list-disc list-inside">
-            {modalReviews.map((review, index) => (
-              <li key={index}>{review}</li>
-            ))}
-          </ul>
-        ) : (
-          !isModalLoading && <p>暫無評論</p>
-        )}
-      </Modal>
     </div>
   );
 };

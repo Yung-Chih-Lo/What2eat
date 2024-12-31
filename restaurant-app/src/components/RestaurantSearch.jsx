@@ -1,9 +1,13 @@
 import React, { useState, useEffect } from 'react';
-import { Search, Star, MapPin, Clock, Phone, AlertCircle, MessageCircle, FolderInput, ChevronDown, ChevronUp } from 'lucide-react';
+import { Search, Star, Clock, FolderInput, AlertCircle, MessageCircle, ChevronDown, ChevronUp } from 'lucide-react';
+import { useParams } from 'react-router-dom'; // 確保導入 useParams
 import HourglassSpinner from './HourglassSpinner';
+import Modal from 'react-modal';
+
+Modal.setAppElement('#root');
 
 const RestaurantSearch = () => {
-  const [searchTerm, setSearchTerm] = useState('');
+  const { name } = useParams(); // 獲取路由參數
   const [searchResult, setSearchResult] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -53,12 +57,12 @@ const RestaurantSearch = () => {
   // 檢查爬蟲結果
   const checkReviewResults = async (keyword) => {
     try {
-      const response = await fetch(`http://localhost:5000/api/reviews/${keyword}`);
+      const response = await fetch(`http://localhost:5000/api/reviews/${encodeURIComponent(keyword)}`);
       if (response.ok) {
         const data = await response.json();
         
         // 檢查分析檔案是否存在
-        const analysisResponse = await fetch(`http://localhost:5000/api/reviews/${keyword}_analysis`);
+        const analysisResponse = await fetch(`http://localhost:5000/api/reviews/${encodeURIComponent(keyword)}_analysis`);
         if (analysisResponse.ok) {
           const analysisData = await analysisResponse.json(); // 解析 JSON 資料
           console.log(analysisData); // 打印解析後的資料
@@ -75,61 +79,64 @@ const RestaurantSearch = () => {
   };
 
   // 處理搜尋
-  const handleSearch = async (e) => {
-    e.preventDefault();
-    if (searchTerm.trim()) {
-      setIsLoading(true);
-      setError(null);
-      setSearchResult(null);
-      setReviewData(null);
-      setScrapingStatus(null);
-      setAnalysisData(null);
-      
-      try {
-        await startScraping(searchTerm);
+  useEffect(() => {
+    const fetchData = async () => {
+      if (name && name.trim()) {
+        setIsLoading(true);
+        setError(null);
+        setSearchResult(null);
+        setReviewData(null);
+        setScrapingStatus(null);
+        setAnalysisData(null);
         
-        let statusCheckInterval;
-        const startTime = Date.now();
-        const timeoutDuration = 600000; // 10分鐘超時
-        
-        statusCheckInterval = setInterval(async () => {
-          const status = await checkScrapingStatus(searchTerm);
+        try {
+          await startScraping(name);
           
-          if (status) {
-            if (status.status === 'completed') {
-              clearInterval(statusCheckInterval);
-              const results = await checkReviewResults(searchTerm);
-              if (results) {
-                setReviewData(results);
-                setSearchResult({
-                  name: searchTerm,
-                  rating: calculateAverageRating(results),
-                  reviewCount: results.length,
-                  updatedTime: new Date().toLocaleString(),
-                  source: "Google Maps"
-                });
+          let statusCheckInterval;
+          const startTime = Date.now();
+          const timeoutDuration = 600000; // 10分鐘超時
+          
+          statusCheckInterval = setInterval(async () => {
+            const status = await checkScrapingStatus(name);
+            
+            if (status) {
+              if (status.status === 'completed') {
+                clearInterval(statusCheckInterval);
+                const results = await checkReviewResults(name);
+                if (results) {
+                  setReviewData(results);
+                  setSearchResult({
+                    name: name,
+                    rating: calculateAverageRating(results),
+                    reviewCount: results.length,
+                    updatedTime: new Date().toLocaleString(),
+                    source: "Google Maps"
+                  });
+                  setIsLoading(false);
+                }
+              } else if (status.status === 'error') {
+                clearInterval(statusCheckInterval);
+                setError(status.error || '爬蟲過程發生錯誤');
                 setIsLoading(false);
               }
-            } else if (status.status === 'error') {
+            }
+            
+            if (Date.now() - startTime > timeoutDuration) {
               clearInterval(statusCheckInterval);
-              setError(status.error || '爬蟲過程發生錯誤');
+              setError('搜尋超時，請稍後再試');
               setIsLoading(false);
             }
-          }
+          }, 3000);
           
-          if (Date.now() - startTime > timeoutDuration) {
-            clearInterval(statusCheckInterval);
-            setError('搜尋超時，請稍後再試');
-            setIsLoading(false);
-          }
-        }, 3000);
-        
-      } catch (error) {
-        setError(error.message);
-        setIsLoading(false);
+        } catch (error) {
+          setError(error.message);
+          setIsLoading(false);
+        }
       }
-    }
-  };
+    };
+
+    fetchData();
+  }, [name]);
 
   // 計算平均評分
   const calculateAverageRating = (reviews) => {
@@ -162,13 +169,11 @@ const RestaurantSearch = () => {
       
       {/* 搜尋區域 */}
       <div className="bg-white/10 backdrop-blur-lg p-8 rounded-2xl shadow-2xl mb-8 border border-white/20">
-        <form onSubmit={handleSearch} className="relative">
+        <form className="relative">
           <div className="relative flex items-center">
             <input
               type="text"
               placeholder="搜尋餐廳名稱..."
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
               className="w-full px-6 py-4 pr-36 rounded-xl 
                        bg-white/80 backdrop-blur-sm
                        border-2 border-transparent
@@ -176,11 +181,11 @@ const RestaurantSearch = () => {
                        text-gray-700 placeholder-gray-400
                        text-lg transition-all duration-300
                        shadow-inner"
-              disabled={isLoading}
+              value={name} // 顯示當前餐廳名稱
+              readOnly
             />
             <button
-              type="submit"
-              disabled={isLoading}
+              type="button"
               className={`absolute right-2 px-6 py-3 
                        bg-gradient-to-r from-gray-600 to-gray-700
                        text-white rounded-lg
@@ -188,19 +193,10 @@ const RestaurantSearch = () => {
                        transition-all duration-300 
                        flex items-center gap-2 
                        shadow-lg shadow-gray-500/30
-                       ${isLoading ? 'opacity-75 cursor-not-allowed' : ''}`}
+                       `}
             >
-              {isLoading ? (
-                <>
-                  <HourglassSpinner size={20} />
-                  <span className="font-medium">搜尋中</span>
-                </>
-              ) : (
-                <>
-                  <Search size={20} />
-                  <span className="font-medium">搜尋</span>
-                </>
-              )}
+              <Search size={20} />
+              <span className="font-medium">搜尋</span>
             </button>
           </div>
         </form>
@@ -345,7 +341,6 @@ const RestaurantSearch = () => {
             </div>
           )}
 
-
           {/* 評論列表 */}
           {reviewData && (
             <div className="bg-white/10 backdrop-blur-lg rounded-2xl overflow-hidden shadow-2xl border border-white/20">
@@ -371,8 +366,6 @@ const RestaurantSearch = () => {
                   ))}
                 </div>
               </div>
-              
-              
             </div>
           )}
         </div>
